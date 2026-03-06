@@ -7,6 +7,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { cleanBase64 } from "../utils";
 
+export type CodexMode = 'mostar' | 'flameborn' | 'generic';
+
 // Helper to ensure we always get a fresh instance with the latest key
 const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -26,15 +28,33 @@ const createBlankImage = (width: number, height: number): string => {
   return cleanBase64(dataUrl);
 };
 
-export const generateStyleSuggestion = async (text: string): Promise<string> => {
+export const generateStyleSuggestion = async (
+  text: string,
+  codex: CodexMode = 'generic'
+): Promise<string> => {
   const ai = getAI();
+
+  const codexContext =
+    codex === 'mostar'
+      ? `This is for a myth-tech industrial civilization brand called "MOSTAR INDUSTRIES". 
+         Favor matte-black architecture, cyan and yellow energy beams, neuromorphic highlights,
+         cinematic lighting, and subtle M-shaped or pillar-based motifs.`
+      : codex === 'flameborn'
+      ? `This is for a myth-tech outbreak-response alliance called "Flameborn". 
+         Favor African landscapes, carved stone pylons, plasma beacons, bioluminescent grids,
+         ceremonial statues, and warm amber + cool cyan light.`
+      : `Use a neutral but cinematic style without any specific brand references.`;
+
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: `Generate a single, creative, short (10-15 words) visual art direction description for a cinematic text animation of the word/phrase: "${text}". 
-      Focus on material, lighting, and environment. 
-      Examples: "Formed by fluffy white clouds in a deep blue sky", "Glowing neon signs reflected in a rainy street", "Carved from ancient stone in a mossy forest".
-      Output ONLY the description.`
+      contents: `
+        Generate a single, creative, short (10-15 words) visual art direction description 
+        for a cinematic Veo 3 video background built around the phrase: "${text}".
+        ${codexContext}
+        Focus on material, lighting, environment, and motion cues (fog, particles, waves, etc.).
+        Output ONLY the description, no extra commentary.
+      `,
     });
     return response.text?.trim() || "";
   } catch (e) {

@@ -6,9 +6,28 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppState } from './types';
-import { generateTextImage, generateTextVideo, generateStyleSuggestion } from './services/geminiService';
+import { generateTextImage, generateTextVideo, generateStyleSuggestion as geminiSuggest, CodexMode } from './services/geminiService';
+import { suggestStyleWithGPT } from './services/openaiCodex';
+import { suggestStyleWithClaude } from './services/claudeCodex';
+import { generateCodexBundle, ModelProvider } from './services/codexOrchestrator';
 import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVideo } from './utils';
-import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
+import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck, Copy, Check } from 'lucide-react';
+
+const getCodexDefaultStyle = (codex: CodexMode): string => {
+  switch (codex) {
+    case 'mostar':
+      return `myth-tech industrial civilization for MOSTAR INDUSTRIES; 
+      matte black architecture, cyan + yellow energy beams, neuromorphic glow, 
+      clean volumetric lighting, cinematic 16:9 frame`;
+    case 'flameborn':
+      return `ancestral cyberpunk Africa for Flameborn; stone pylons and monoliths, 
+      bioluminescent health grids, plasma beacons in cyan + amber, 
+      rivers of light connecting villages, cinematic haze`;
+    default:
+      return `high-end cinematic typography in a minimal environment, 
+      neutral lighting, clean depth-of-field, studio-grade look`;
+  }
+};
 
 interface Video {
   id: string;
@@ -22,27 +41,27 @@ const staticFilesUrl = 'https://www.gstatic.com/aistudio/starter-apps/type-motio
 export const MOCK_VIDEOS: Video[] = [
   {
     id: '1',
-    title: "Cloud Formations",
+    title: "Mostar Myth-Tech Gate",
     videoUrl: staticFilesUrl + 'clouds_v2.mp4',
-    description: "Text formed by fluffy white clouds in a deep blue summer sky.",
+    description: "A matte-black industrial skyline with cyan and yellow energy pillars forming the hidden M-sigil.",
   },
   {
     id: '2',
-    title: "Elemental Fire",
+    title: "Flameborn Outbreak Beacon",
     videoUrl: staticFilesUrl + 'fire_v2.mp4',
-    description: "Flames erupt into text in an arid dry environment.",
+    description: "Ancestral towers and plasma beacons igniting an emergency health corridor across the desert night.",
   },
   {
     id: '3',
-    title: "Mystic Smoke",
+    title: "Twin Flame Transit Ring",
     videoUrl: staticFilesUrl + 'smoke_v2.mp4',
-    description: "A sudden wave of smoke swirling to reveal the text.",
+    description: "Concentric transport rings breathing smoke and light as shipments move through the grid.",
   },
   {
     id: '4',
-    title: "Water Blast",
+    title: "Soulstream Control Deck",
     videoUrl: staticFilesUrl + 'water_v2.mp4',
-    description: "A wall of water punching through text with power.",
+    description: "A liquid-light interface where Veo-generated reels stream into dashboards and command surfaces.",
   },
 ];
 
@@ -161,11 +180,19 @@ const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
   const [viewMode, setViewMode] = useState<'gallery' | 'create'>('gallery');
   const [showKeyDialog, setShowKeyDialog] = useState(false);
+  const [codex, setCodex] = useState<CodexMode>('mostar');
+  const [provider, setProvider] = useState<ModelProvider>("gemini");
 
   const [inputText, setInputText] = useState<string>("");
   const [inputStyle, setInputStyle] = useState<string>("");
   const [typographyPrompt, setTypographyPrompt] = useState<string>("");
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
+
+  // Codex Bundle Results
+  const [sceneScript, setSceneScript] = useState<string>("");
+  const [voiceover, setVoiceover] = useState<string>("");
+  const [metadataTags, setMetadataTags] = useState<string[]>([]);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
 
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
@@ -219,10 +246,24 @@ const App: React.FC = () => {
     setVideoSrc(null);
     setImageSrc(null);
     
-    const styleToUse = inputStyle.trim() || getRandomStyle();
-    setStatusMessage(`Designing "${inputText}"...`);
+    setStatusMessage(`Consulting ${provider.toUpperCase()} codex for "${inputText}"...`);
 
     try {
+      // 1) ONE provider pays here:
+      const bundle = await generateCodexBundle(inputText, codex, provider);
+
+      const styleToUse =
+        (inputStyle.trim() || bundle.style || "").trim() ||
+        getCodexDefaultStyle(codex);
+
+      setInputStyle(styleToUse);      // reflect back in UI
+      setSceneScript(bundle.sceneScript || "");
+      setVoiceover(bundle.voiceover || "");
+      setMetadataTags(bundle.tags || []);
+
+      // 2) Now Veo/Gemini pipeline
+      setStatusMessage(`Designing "${inputText}"...`);
+
       const { data: b64Image, mimeType } = await generateTextImage({
         text: inputText, 
         style: styleToUse,
@@ -290,6 +331,12 @@ const App: React.FC = () => {
     }
   };
 
+  const copyToClipboard = (text: string, field: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedField(field);
+    setTimeout(() => setCopiedField(null), 2000);
+  };
+
   const renderAppContent = () => {
     if (state === AppState.ERROR) {
        return (
@@ -333,18 +380,90 @@ const App: React.FC = () => {
             {videoSrc && <video src={videoSrc} autoPlay loop playsInline controls className="w-full h-full object-cover animate-in fade-in duration-1000" />}
           </div>
           {state === AppState.PLAYING && (
-            <div className="w-full max-w-6xl mt-6 flex flex-col md:flex-row items-center justify-between gap-4 animate-in slide-in-from-bottom-4 fade-in duration-700">
-              <button onClick={reset} className="flex items-center gap-2 px-6 py-3 text-stone-500 dark:text-stone-400 hover:text-stone-900 dark:hover:text-white hover:bg-stone-100 dark:hover:bg-zinc-800 rounded-xl transition-all font-bold text-sm uppercase tracking-wide group">
-                <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" />
-                Create Another
-              </button>
-              <div className="flex items-center gap-3 w-full md:w-auto justify-center md:justify-end">
-               <button onClick={handleDownloadGif} disabled={isGifGenerating} className="px-5 py-3 bg-white dark:bg-zinc-900 text-stone-900 dark:text-stone-200 border border-stone-200 dark:border-zinc-700 font-bold rounded-xl hover:bg-stone-50 dark:hover:bg-zinc-800 transition-colors flex items-center gap-2 disabled:opacity-50 text-sm">
-                {isGifGenerating ? <Loader2 size={16} className="animate-spin" /> : <FileType size={16} />} GIF
-              </button>
-               <button onClick={handleDownload} className="px-6 py-3 bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 font-bold rounded-xl hover:bg-stone-800 dark:hover:bg-white transition-colors flex items-center gap-2 shadow-xl shadow-stone-900/10 dark:shadow-white/5 active:scale-[0.98] text-sm">
-                <Download size={16} /> Download MP4
-              </button>
+            <div className="w-full max-w-6xl mt-6 space-y-8 animate-in slide-in-from-bottom-4 fade-in duration-700">
+              {/* Action Buttons */}
+              <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+                <button onClick={reset} className="flex items-center gap-2 px-6 py-3 text-stone-500 dark:text-stone-400 hover:text-stone-900 dark:hover:text-white hover:bg-stone-100 dark:hover:bg-zinc-800 rounded-xl transition-all font-bold text-sm uppercase tracking-wide group">
+                  <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" />
+                  Create Another
+                </button>
+                <div className="flex items-center gap-3 w-full md:w-auto justify-center md:justify-end">
+                  <button onClick={handleDownloadGif} disabled={isGifGenerating} className="px-5 py-3 bg-white dark:bg-zinc-900 text-stone-900 dark:text-stone-200 border border-stone-200 dark:border-zinc-700 font-bold rounded-xl hover:bg-stone-50 dark:hover:bg-zinc-800 transition-colors flex items-center gap-2 disabled:opacity-50 text-sm">
+                    {isGifGenerating ? <Loader2 size={16} className="animate-spin" /> : <FileType size={16} />} GIF
+                  </button>
+                  <button onClick={handleDownload} className="px-6 py-3 bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 font-bold rounded-xl hover:bg-stone-800 dark:hover:bg-white transition-colors flex items-center gap-2 shadow-xl shadow-stone-900/10 dark:shadow-white/5 active:scale-[0.98] text-sm">
+                    <Download size={16} /> Download MP4
+                  </button>
+                </div>
+              </div>
+
+              {/* Codex Brain Results Panel */}
+              <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-stone-100 dark:border-zinc-800 overflow-hidden shadow-sm">
+                <div className="px-6 py-4 border-b border-stone-100 dark:border-zinc-800 flex items-center justify-between bg-stone-50/50 dark:bg-zinc-900/50">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={16} className="text-stone-400" />
+                    <h3 className="text-sm font-bold uppercase tracking-widest text-stone-500 dark:text-zinc-400">
+                      Codex Brain: <span className="text-stone-900 dark:text-white">{provider.toUpperCase()}</span>
+                    </h3>
+                  </div>
+                  <div className="text-[10px] font-mono text-stone-400 dark:text-zinc-500">
+                    ISOLATED BILLING ACTIVE
+                  </div>
+                </div>
+                
+                <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
+                  {/* Scene Script */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                        <Clapperboard size={14} /> Scene Script
+                      </h4>
+                      {sceneScript && (
+                        <button onClick={() => copyToClipboard(sceneScript, 'script')} className="text-stone-400 hover:text-stone-900 dark:hover:text-white transition-colors">
+                          {copiedField === 'script' ? <Check size={14} /> : <Copy size={14} />}
+                        </button>
+                      )}
+                    </div>
+                    <div className="bg-stone-50 dark:bg-zinc-950 p-4 rounded-xl text-sm text-stone-600 dark:text-stone-300 leading-relaxed min-h-[100px] border border-stone-100 dark:border-zinc-800">
+                      {sceneScript || "No script generated for this provider."}
+                    </div>
+                  </div>
+
+                  {/* Voiceover / Headline */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                        <Volume2 size={14} /> Voiceover / Headline
+                      </h4>
+                      {voiceover && (
+                        <button onClick={() => copyToClipboard(voiceover, 'vo')} className="text-stone-400 hover:text-stone-900 dark:hover:text-white transition-colors">
+                          {copiedField === 'vo' ? <Check size={14} /> : <Copy size={14} />}
+                        </button>
+                      )}
+                    </div>
+                    <div className="bg-stone-50 dark:bg-zinc-950 p-4 rounded-xl text-sm text-stone-600 dark:text-stone-300 leading-relaxed min-h-[100px] border border-stone-100 dark:border-zinc-800 italic">
+                      {voiceover ? `"${voiceover}"` : "No voiceover generated."}
+                    </div>
+                  </div>
+
+                  {/* Metadata Tags */}
+                  <div className="md:col-span-2 space-y-3">
+                    <h4 className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                      <ShieldCheck size={14} /> Metadata Tags
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {metadataTags.length > 0 ? (
+                        metadataTags.map((tag, i) => (
+                          <span key={i} className="px-3 py-1 bg-stone-100 dark:bg-zinc-800 text-stone-600 dark:text-stone-400 text-[10px] font-mono rounded-full border border-stone-200 dark:border-zinc-700">
+                            #{tag.replace(/\s+/g, '')}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-[10px] text-stone-400 italic">No tags generated.</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -361,24 +480,113 @@ const App: React.FC = () => {
         <form onSubmit={startProcess} className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-5">
+              {/* Codex Mode */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                  <Clapperboard size={14} /> Video Codex
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { id: 'mostar', label: 'Mostar Myth-Tech' },
+                    { id: 'flameborn', label: 'Flameborn Ops' },
+                    { id: 'generic', label: 'Raw Typography' },
+                  ].map(opt => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setCodex(opt.id as CodexMode)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                        codex === opt.id
+                          ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 border-stone-900 dark:border-stone-100'
+                          : 'bg-stone-50 dark:bg-zinc-900 text-stone-500 dark:text-stone-300 border-stone-200 dark:border-zinc-700 hover:bg-stone-100 dark:hover:bg-zinc-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-stone-400 dark:text-zinc-500">
+                  Choose which myth-tech codex shapes the prompt logic. Mostar = industry & infrastructure,
+                  Flameborn = outbreak & guardians, Raw = neutral typography.
+                </p>
+              </div>
+
+              {/* Model Provider */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                  <Sparkles size={14} /> Brain
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { id: 'gemini', label: 'Gemini (default)' },
+                    { id: 'gpt', label: 'GPT' },
+                    { id: 'claude', label: 'Claude' },
+                  ].map(opt => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setProvider(opt.id as ModelProvider)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                        provider === opt.id
+                          ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 border-stone-900 dark:border-stone-100'
+                          : 'bg-stone-50 dark:bg-zinc-900 text-stone-500 dark:text-stone-300 border-stone-200 dark:border-zinc-700 hover:bg-stone-100 dark:hover:bg-zinc-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Content */}
               <div className="space-y-2">
                 <label className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
                   <Type size={14} /> Content
                 </label>
-                <input type="text" value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder="Enter text..." maxLength={40} className="w-full bg-stone-50 dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl px-4 py-3 text-lg font-medium focus:outline-none focus:ring-2 focus:ring-stone-900 dark:focus:ring-stone-100 transition-all placeholder-stone-300 dark:placeholder-zinc-700 text-stone-900 dark:text-white" required />
+                <input
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder="Enter a title, slogan, or scene name..."
+                  maxLength={60}
+                  className="w-full bg-stone-50 dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl px-4 py-3 text-lg font-medium focus:outline-none focus:ring-2 focus:ring-stone-900 dark:focus:ring-stone-100 transition-all placeholder-stone-300 dark:placeholder-zinc-700 text-stone-900 dark:text-white"
+                  required
+                />
               </div>
+
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-bold text-stone-400 dark:text-zinc-500 uppercase tracking-wider flex items-center gap-2">
                     <Wand2 size={14} /> Art Direction
                   </label>
-                  <button type="button" onClick={async () => {
-                    setIsSuggestingStyle(true);
-                    const suggestion = await generateStyleSuggestion(inputText);
-                    if (suggestion) setInputStyle(suggestion);
-                    setIsSuggestingStyle(false);
-                  }} disabled={!inputText.trim() || isSuggestingStyle} className="text-xs font-medium text-stone-500 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200 flex items-center gap-1 transition-colors disabled:opacity-50">
-                      {isSuggestingStyle ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} {isSuggestingStyle ? 'Thinking...' : 'Suggest'}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!inputText.trim()) return;
+                      setIsSuggestingStyle(true);
+                      
+                      let suggestion = "";
+                      try {
+                        if (provider === "gpt") {
+                          suggestion = await suggestStyleWithGPT(inputText, codex);
+                        } else if (provider === "claude") {
+                          suggestion = await suggestStyleWithClaude(inputText, codex);
+                        } else {
+                          suggestion = await geminiSuggest(inputText, codex);
+                        }
+                      } catch (err) {
+                        console.error("Style suggestion failed", err);
+                        suggestion = await geminiSuggest(inputText, codex);
+                      }
+
+                      if (suggestion) setInputStyle(suggestion);
+                      setIsSuggestingStyle(false);
+                    }}
+                    disabled={!inputText.trim() || isSuggestingStyle}
+                    className="text-xs font-medium text-stone-500 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200 flex items-center gap-1 transition-colors disabled:opacity-50"
+                  >
+                    {isSuggestingStyle ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}{" "}
+                    {isSuggestingStyle ? "Thinking..." : "Codex Suggest"}
                   </button>
                 </div>
                 <textarea value={inputStyle} onChange={(e) => setInputStyle(e.target.value)} placeholder="e.g. 'Made of clouds in a blue sky'..." className="w-full bg-stone-50 dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900 dark:focus:ring-stone-100 transition-all placeholder-stone-300 dark:placeholder-zinc-700 text-stone-900 dark:text-white resize-none h-24" />
@@ -463,19 +671,31 @@ const App: React.FC = () => {
              <div className="min-w-[300px] lg:w-[480px]">
                 <div className="space-y-4 lg:space-y-6">
                   <div className="font-bold text-xl tracking-tight text-stone-900 dark:text-white flex items-center justify-center lg:justify-start gap-2">
-                      <div className="w-8 h-8 bg-stone-900 dark:bg-white rounded-lg flex items-center justify-center">
-                        <span className="text-white dark:text-stone-900 text-xs font-serif italic">T</span>
-                      </div>
-                      TypeMotion
+                    <div className="w-10 h-10 bg-stone-900 dark:bg-white rounded-lg flex items-center justify-center overflow-hidden">
+                      <img 
+                        src="https://ais-dev-ysgvpv3k2ghiihrp3t4nvf-430508190624.europe-west2.run.app/logo.png" 
+                        alt="Mostar Industries" 
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    </div>
+                    Mostar Industries · Video Camp
                   </div>
-                  <h1 className="text-4xl lg:text-5xl font-bold text-stone-900 dark:text-white tracking-tight leading-tight">Cinematic Motion <br/> <span className="text-stone-400 dark:text-zinc-600">Typography</span></h1>
-                  <p className="text-lg text-stone-500 dark:text-stone-400 leading-relaxed max-w-md mx-auto lg:mx-0">Create stunning 3D text animations using generative AI. Turn simple words into cinematic masterpieces.</p>
-               </div>
-               <div className="pt-8 flex flex-col items-center lg:items-start">
+                  <h1 className="text-4xl lg:text-5xl font-bold text-stone-900 dark:text-white tracking-tight leading-tight">
+                    Myth-Tech Civilization Reels <br />
+                    <span className="text-stone-400 dark:text-zinc-600">Powered by Veo 3 & the Video Codex</span>
+                  </h1>
+                  <p className="text-lg text-stone-500 dark:text-stone-400 leading-relaxed max-w-md mx-auto lg:mx-0">
+                    Spin up cinematic background loops and hero shots for MOSTAR INDUSTRIES and Flameborn —
+                    Veo 3 + AI codices turning prompts into living myth-tech worlds.
+                  </p>
+                </div>
+                <div className="pt-8 flex flex-col items-center lg:items-start">
                   <button onClick={handleMainCta} className="group px-8 py-4 bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 text-lg font-bold rounded-xl hover:bg-stone-800 dark:hover:bg-white transition-all shadow-xl shadow-stone-900/20 dark:shadow-white/10 active:scale-95 flex items-center gap-3">
-                    <VideoIcon size={20} className="group-hover:text-yellow-200 dark:group-hover:text-amber-500 transition-colors" /> Make your own
+                    <VideoIcon size={20} className="group-hover:text-yellow-200 dark:group-hover:text-amber-500 transition-colors" />
+                    Launch Video Camp
                   </button>
-               </div>
+                </div>
              </div>
           </div>
           <div className={`relative z-20 [perspective:2000px] transition-all duration-1000 ease-[cubic-bezier(0.25,0.8,0.25,1)] ${isFlip ? 'w-full h-[80vh] md:h-[85vh]' : 'w-full lg:w-7/12 h-[500px] lg:h-[600px]'}`}>
